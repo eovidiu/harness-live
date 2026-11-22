@@ -1,6 +1,10 @@
-# Harness Live protocol, version 1 (draft)
+# Harness Live protocol, version 1 (draft 2)
 
 Status: draft for review. Not implemented.
+
+Draft 2 includes the results of a check against real session history:
+185 lead sessions, 4,013 subagent sessions and 364,857 Live envelopes.
+Section 10 lists the changes and the evidence.
 
 This protocol connects an omp session (the client) to the Harness Live server.
 The harness extension in each session is the client. It connects to the server.
@@ -10,11 +14,16 @@ The server never searches for sessions.
 
 - Unix domain socket: `~/.config/vv-omp-harness/live.sock`, file mode `0600`.
   The parent directory has mode `0700`.
-- One connection for each session. A lead session and each subagent have their own connection.
+- One connection for each session. A lead session, each subagent and each advisor have their own connection.
 - Encoding: UTF-8, one JSON object on each line (NDJSON). No line breaks inside an object.
 - Maximum line length: 4 MiB. The receiver closes the connection if a line is longer.
 - Each message has a field `t` (the message type).
 - A receiver ignores fields that it does not know. A receiver ignores message types that it does not know.
+- The server accepts a minimum of 512 connections at the same time.
+  One omp process can hold more than 100 connections.
+
+Only a session with a harness root (a `.harness` directory) connects.
+A session with no harness root does not connect.
 
 ## 2. Connection sequence
 
@@ -23,8 +32,9 @@ client                                server
   | ---- connect ---------------------> |
   | ---- hello -----------------------> |
   | <--- welcome  (or reject, close) -- |
-  | ---- view ------------------------> |   first view, always
-  | ---- event / view  (many) --------> |
+  | ---- status ----------------------> |   first status, always
+  | ---- view ------------------------> |   first view, lead and provider only
+  | ---- event / status / view -------> |
   | <--- cmd -------------------------- |
   | ---- cmd_result ------------------> |
   | ---- bye  (optional) -------------> |
@@ -32,8 +42,9 @@ client                                server
 ```
 
 - The client sends `hello` first. The server answers with `welcome` or `reject`.
-- After `welcome`, the client sends one `view` before other messages.
-- A closed socket means that the session ended. `bye` only gives the reason.
+- After `welcome`, the client sends one `status`. A lead session and a provider also send one `view`.
+- A subagent and an advisor send no `view`. The view of their lead is the state of the project.
+- A closed socket means that the session ended. A close with no `bye` is an unclean end.
 - The server does not send a heartbeat. The operating system closes the socket when the process stops.
 
 ## 3. Messages from the client
@@ -49,37 +60,95 @@ client                                server
     "lead": "01a1c3f9-42ec-7360-98c8-1060c6215f33",
     "role": "lead",
     "agent": "lead",
-    "parent": null
+    "parent": null,
+    "file": "/sessions/acme-api/2026-11-22_01a1c3f9.jsonl"
   },
   "project": {
     "key": "9f2c4e1ab07d3355",
+    "common_key": "41c0d2a97be85f10",
     "root": "/work/acme-api",
     "name": "acme-api"
   },
-  "harness": { "version": "2.45.0", "provider": ["bun", "/plugins/vv-omp-harness/bin/provider.ts"] },
+  "cwd": "/work/acme-api",
+  "harness": {
+    "version": "2.45.0",
+    "build": "2.45.0+9c37708a1b2c",
+    "provider": ["bun", "/plugins/vv-omp-harness/bin/provider.ts"]
+  },
   "omp": { "version": "19.1.0", "mode": "tui" },
   "pid": 48211,
   "started_at": 1795340000000,
-  "verbs": ["session.prompt", "session.abort", "session.shutdown", "view.refresh", "ledger.sync"]
+  "verbs": ["session.prompt", "session.abort", "session.shutdown", "ask.answer", "agent.cancel", "view.refresh", "ledger.sync"]
 }
 ```
 
 | Field | Rule |
 |---|---|
 | `protocols` | The protocol versions that the client supports. |
-| `session.id` | The id of this session. Unique for each connection. |
+| `session.id` | The id of this session. |
 | `session.lead` | The id of the lead session. A subagent gives the id of its lead. |
-| `session.role` | `lead`, `subagent` or `provider`. |
+| `session.role` | `lead`, `subagent`, `advisor` or `provider`. |
 | `session.agent` | `lead`, or the task name of the subagent. |
-| `project.key` | First 16 hexadecimal characters of SHA-256 of the real path of the root. |
+| `session.parent` | The agent that started this one. `null` for a lead. A subagent can start subagents. |
+| `session.file` | The path of the session file, or `null`. |
+| `project.key` | First 16 hexadecimal characters of SHA-256 of the real path of the harness root. Different for each worktree. |
+| `project.common_key` | The same hash of the git common directory. Equal for all worktrees of one repository. The server uses it to group worktrees that share one ledger. |
+| `harness.build` | Version and commit, or `null`. |
 | `harness.provider` | The command that builds one view for this project. The server stores it and uses it when no session runs. |
-| `omp.mode` | `tui`, `rpc` or `print`. |
-| `pid` | The process id. The server compares it with the peer id from the operating system. |
+| `omp.version` | The omp version, or `null` if the session cannot read it. |
+| `omp.mode` | `tui`, `rpc`, `json` or `print`. |
+| `pid` | The process id. The server compares it with the peer id from the operating system. A lead and its subagents can have the same `pid`. |
 | `verbs` | The commands that this session accepts. The server sends no other verb. |
 
-### 3.2 `view`
+### 3.2 `status`
+
+The complete state of one session. Each `status` replaces the previous one.
+It is small. The client sends it when a value changes.
+
+```json
+{
+  "t": "status",
+  "ts": 1795340001000,
+  "rev": 7,
+  "idle": false,
+  "model": "claude-fable-5-2",
+  "waiting_on": {
+    "kind": "ask",
+    "call": "toolu_01AbC",
+    "since": 1795340000900,
+    "feature": "F012",
+    "topic": "review",
+    "answerable": true,
+    "questions": [
+      {
+        "id": "q0",
+        "header": "F012 review",
+        "question": "All lenses approved round 2. The change touches a risk_high path. Accept?",
+        "options": [ { "label": "Accept" }, { "label": "Reject" } ],
+        "recommended": "Accept",
+        "multi": false,
+        "free_text": true
+      }
+    ]
+  }
+}
+```
+
+| Field | Rule |
+|---|---|
+| `rev` | Increases by 1 for each status on this connection. |
+| `idle` | `true` when the agent waits for a user prompt. The server uses it to show the session state. |
+| `waiting_on` | `null`, or the open question that a person must answer. |
+| `waiting_on.kind` | `ask` in version 1. |
+| `waiting_on.call` | The id of the `ask` tool call. The verb `ask.answer` uses it. |
+| `waiting_on.topic` | The harness prefix of the question, or `null`: `review`, `ops`, `spec`, `flow_approval`, `flow_move`, `preflight`, `harness-config`, and others. |
+| `waiting_on.feature` | The feature id, or `null`. |
+| `waiting_on.answerable` | `false` if the question cannot be answered through the protocol. An HTML form is not answerable in version 1; the person answers it in the terminal. |
+
+### 3.3 `view`
 
 The complete state of one project. Each `view` replaces the previous one.
+Only a lead session and a provider send it.
 
 ```json
 {
@@ -89,34 +158,47 @@ The complete state of one project. Each `view` replaces the previous one.
   "view": {
     "generated_at": 1795340000480,
     "gates": "enforce",
-    "ledger": { "backend": "linear", "container": "Linear project vv-harness", "fetched_at": 1795339990000, "error": null },
-    "flows": {
-      "standard": ["spec", "implement", "focused_test", "review", "impact_test"]
+    "ledger": {
+      "backend": "linear", "container": "Linear project vv-harness", "label": "vv-harness",
+      "fetched_at": 1795339990000, "generation": 41, "error": null
     },
-    "steps": {
-      "spec": { "kind": "agent", "description": "the spec is complete and testable" },
-      "review": { "kind": "panel", "description": "every lens votes APPROVE on the same code" }
+    "flow": {
+      "approved": true,
+      "default": "standard",
+      "by_scope": [ { "glob": "src/live/ui/**", "flow": "web" } ],
+      "flows": { "standard": ["spec", "implement", "focused_test", "review", "impact_test"] },
+      "steps": {
+        "spec": { "kind": "agent", "agent": "harness-spec-verification", "description": "the spec is complete and testable" },
+        "review": { "kind": "panel", "agent": "harness-reviewer", "description": "every lens votes APPROVE on the same code", "max_rounds": 5 }
+      }
     },
     "features": [
       {
         "id": "F012",
         "title": "Redact tokens in tool output",
+        "description": "Tokens in tool output must not reach the log.",
         "status": "in_progress",
+        "priority": 2,
         "url": "https://linear.app/example/issue/OVI-260",
         "flow": "standard",
         "scope": ["src/live/redact.ts"],
         "depends_on": [],
+        "split_of": null,
+        "failure_reason": null,
+        "spec": { "verdict": "PASS", "verified_at": 1795330000000 },
         "claimed_by": { "session": "01a1c3f9-42ec-7360-98c8-1060c6215f33", "branch": "f012-redact" },
         "progress": [
-          { "step": "spec", "state": "done" },
-          { "step": "implement", "state": "done" },
+          { "step": "spec", "state": "done", "at": 1795330000000 },
+          { "step": "implement", "state": "done", "at": 1795335000000 },
           { "step": "focused_test", "state": "running" },
-          { "step": "review", "state": "pending" },
+          { "step": "review", "state": "pending", "origin": { "kind": "rule", "rule": "risk_paths", "cause": "paths" } },
           { "step": "impact_test", "state": "pending" }
         ],
-        "waiting_on": null
+        "waiting": null,
+        "panel": { "round": 2, "max_rounds": 5, "lenses": [ { "lens": "correctness", "vote": "APPROVE" }, { "lens": "tests", "vote": "CHANGES" } ], "risk": "high" }
       }
     ],
+    "decisions": [],
     "drift": [],
     "errors": []
   }
@@ -126,9 +208,15 @@ The complete state of one project. Each `view` replaces the previous one.
 | Field | Rule |
 |---|---|
 | `rev` | Increases by 1 for each view on this connection. |
-| `view.features[].status` | `pending`, `in_progress`, `blocked`, `passing`, `canceled`. |
+| `view.flow.approved` | `false` when the flow file changed and a person did not approve it. |
+| `view.features[].status` | `pending`, `in_progress`, `blocked`, `passing`, `failed`, `removed`. The harness maps its ledger values to these. |
+| `view.features[].description` | A maximum of 4,000 characters. |
 | `view.features[].progress[].state` | `pending`, `running`, `done`, `failed`, `waiting`. |
-| `view.features[].waiting_on` | `null`, or an object that describes the decision that a person must make. |
+| `view.features[].progress[].override` | Optional. Present when a person or a rule replaced the usual result of the step. |
+| `view.features[].progress[].origin` | Optional. Present when a rule or the lead added the step. |
+| `view.features[].waiting` | `null`, or the text of what a person must settle for this feature. |
+| `view.features[].panel` | `null`, or the state of the review panel. |
+| `view.decisions` | The latest decision-model results that affect the state. |
 | `view.errors` | Text for each part of the state that the harness could not read. |
 
 All text passes through the harness `redact` function before the client sends it.
@@ -136,10 +224,12 @@ All text passes through the harness `redact` function before the client sends it
 The harness sends a `view`:
 
 - after `welcome`;
-- after a change of the flow, the ledger or the evidence;
+- after a change of the flow, the ledger, the evidence or the panel state, also when a different process made the change;
 - after the command `view.refresh`.
 
-### 3.3 `event`
+The client sends a maximum of one `view` each second. A newer view replaces a view that waits.
+
+### 3.4 `event`
 
 One activity record. Events can be lost. State must not depend on events.
 
@@ -167,34 +257,48 @@ Kinds in version 1:
 | Group | Kinds |
 |---|---|
 | Agent | `agent.spawn`, `agent.progress`, `agent.end`, `agent.brief` |
-| Turn | `turn.start`, `turn.end`, `lead.idle` |
+| Turn | `turn.start`, `turn.end` |
 | Tool | `tool.start`, `tool.output`, `tool.end` |
 | Text | `text.delta` |
+| User | `user.prompt` |
+| Session | `session.compaction` |
 | Harness | `harness.gate`, `harness.test`, `harness.ledger`, `harness.decision`, `harness.panel` |
 
-The `data` object of each kind is the same as in the current Live envelope
-(`src/live/protocol.ts` in `vv-omp-harness`). These current kinds are not in version 1:
+- The `data` object of each current kind is the same as in the current Live envelope
+  (`src/live/protocol.ts` in `vv-omp-harness`).
+- `user.prompt` has `length` and `steering`. It does not contain the text.
+- `session.compaction` has no required data.
+- The client makes `harness.decision` and `harness.panel`. The server made them before, from project files.
+- The fields `assignment` and `context` of `agent.spawn` have a maximum of 8 KiB each.
+- The client combines fast `text.delta`, `tool.output` and `agent.progress` updates, as the current tap does.
+
+These current kinds are not in version 1:
 
 - `session.start`, `session.end`: replaced by `hello`, `bye` and the socket state.
 - `harness.features`, `harness.flow`, `harness.flow_steps`, `harness.flow_unreadable`: replaced by `view`.
-- `stall.clear`: the server makes it.
+- `lead.idle`: replaced by `status.idle`.
+- `stall`, `stall.clear`: the server makes them from the events and the status. It needs no project files.
 
-### 3.4 `cmd_result`
-
-```json
-{ "t": "cmd_result", "id": "c-7f3a", "ok": true, "data": {} }
-{ "t": "cmd_result", "id": "c-7f3b", "ok": false, "error": { "code": "busy", "message": "the agent is not idle" } }
-```
-
-Error codes: `unknown_verb`, `bad_args`, `busy`, `refused`, `failed`, `timeout`.
-
-### 3.5 `bye`
+### 3.5 `cmd_result`
 
 ```json
-{ "t": "bye", "reason": "session_shutdown" }
+{ "t": "cmd_result", "id": "c-7f3a", "ok": true, "data": { "delivered_as": "steer" } }
+{ "t": "cmd_result", "id": "c-7f3b", "ok": false, "error": { "code": "stale", "message": "the question is closed" } }
 ```
 
-Reasons: `session_shutdown`, `provider_done`, `error`.
+Error codes: `unknown_verb`, `bad_args`, `stale`, `refused`, `failed`, `timeout`.
+
+### 3.6 `bye`
+
+```json
+{ "t": "bye", "reason": "signal", "signal": "SIGTERM", "pending_calls": 2 }
+```
+
+| Field | Rule |
+|---|---|
+| `reason` | `session_shutdown`, `provider_done`, `signal`, `fatal`, `error`. |
+| `signal` | The signal name, for the reason `signal`. |
+| `pending_calls` | The number of tool calls that did not end. |
 
 ## 4. Messages from the server
 
@@ -215,10 +319,16 @@ Reasons: `session_shutdown`, `provider_done`, `error`.
 Codes: `no_common_protocol`, `bad_hello`, `peer_mismatch`, `duplicate_session`.
 The server closes the connection after `reject`. The client does not try again in this session.
 
+Rule for a `session.id` that the server already knows:
+
+- The old connection is closed: the server accepts the new one. This is a resumed session.
+- The old connection is open and has the same `pid`: the new connection replaces the old one.
+- The old connection is open and has a different `pid`: the server sends `reject` with `duplicate_session`.
+
 ### 4.3 `cmd`
 
 ```json
-{ "t": "cmd", "id": "c-7f3a", "verb": "session.prompt", "args": { "text": "Continue with F012." }, "deadline_ms": 10000 }
+{ "t": "cmd", "id": "c-7f3a", "verb": "session.prompt", "args": { "text": "Continue with F012.", "deliver_as": "auto" }, "deadline_ms": 10000 }
 ```
 
 - `id` is unique for each command. The client gives the same `id` in `cmd_result`.
@@ -229,32 +339,36 @@ Verbs in version 1:
 
 | Verb | Arguments | Effect in the session | Accepted by |
 |---|---|---|---|
-| `session.prompt` | `text` | Adds a user message. The gates apply as usual. | `tui` sessions |
-| `session.abort` | none | Stops the current agent operation. | `tui` sessions |
-| `session.shutdown` | none | Stops the session. | `tui` sessions |
-| `view.refresh` | none | Builds and sends a new `view`. | all sessions |
+| `session.prompt` | `text`, `deliver_as` | Adds a user message. The gates apply as usual. | `tui` lead sessions |
+| `session.abort` | none | Stops the current agent operation. | `tui` lead sessions |
+| `session.shutdown` | none | Stops the session. | `tui` lead sessions |
+| `ask.answer` | `call`, `answers`, `text` | Answers the open question in `status.waiting_on`. | lead sessions |
+| `agent.cancel` | `agent` | Stops one subagent. | lead sessions |
+| `view.refresh` | none | Builds and sends a new `view`. | lead sessions, providers |
 | `ledger.sync` | none | Syncs the ledger with the tracker, then sends a new `view`. | lead sessions |
 
-A session that the server started in RPC mode gets prompt, steer, abort and stop through RPC on stdio.
-It does not list the `session.*` verbs in `hello`.
+- `deliver_as`: `auto`, `steer` or `follow_up`. With `auto`, omp starts a prompt if the agent is idle and queues a steer if the agent is busy. The result gives `delivered_as`.
+- `ask.answer`: `answers` is an object from question id to the selected labels. `text` is optional free text. If `call` is not the open question, the result is `stale`.
+- A session that the server started in RPC mode gets prompt, steer, abort and stop through RPC on stdio. It does not list the `session.*` verbs in `hello`.
 
 ## 5. Rules for the client
 
 1. The client never blocks an omp hook. It writes to a queue in memory.
-2. The queue has a size limit. When it is full, the client drops the oldest `event` and counts it in `dropped`.
-3. The client never drops a `view`. A new `view` replaces a `view` that is still in the queue.
-4. If the connection fails, the client drops events. It tries to connect again before the next prompt.
-5. After each new connection, the client sends `hello`, then a full `view`.
+2. The queue for each connection has a limit of 2,500 events or 2 MiB. When it is full, the client drops the oldest `event` and counts it in `dropped`.
+3. The client never drops a `view` or a `status`. A newer one replaces one that waits in the queue.
+4. If the connection fails, the client drops events. It tries to connect again on a timer: after 1 second, then with a delay that doubles to a maximum of 30 seconds.
+5. After each new connection, the client sends `hello`, then a full `status`, then a full `view` (lead and provider).
 6. The client runs only the verbs that it listed in `hello`.
 
 ## 6. Rules for the server
 
 1. The server accepts connections only from the same operating system user.
 2. The server compares `hello.pid` with the peer process id, where the operating system gives one.
-3. The server keeps the latest `view` for each project and the events for each session.
-4. When a socket closes, the server marks the session as ended.
+3. The server keeps the latest `view` for each project, the latest `status` for each session, and the events for each session.
+4. When a socket closes, the server marks the session as ended. With no `bye` before the close, it marks an unclean end.
 5. The server sends a `cmd` only for a verb in the `verbs` list of that session.
 6. The server reads no project files and calls no tracker.
+7. The server sends `ask.answer` only if the project permits remote answers. This is a setting of the user, not of the repository.
 
 ## 7. Provider command
 
@@ -262,7 +376,7 @@ For a project with no session, the server starts the command from `harness.provi
 with the project root as the working directory. The provider:
 
 1. connects and sends `hello` with `session.role` = `provider`;
-2. sends one `view`;
+2. sends one `status` and one `view`;
 3. sends `bye` with reason `provider_done` and closes.
 
 ## 8. Version rules
@@ -273,7 +387,34 @@ with the project root as the working directory. The provider:
 
 ## 9. Open points
 
-1. The full field list of `view.features[]`. This draft shows the minimum.
-2. The shape of `waiting_on` (a decision that a person must make).
-3. The size limit of the client queue.
-4. A `session.steer` verb for `tui` sessions.
+1. Not tested: an omp extension can answer an open `ask` call for a `tui` session. The verb `ask.answer` depends on this. A small test is necessary.
+2. Not tested: the result when the server sends a prompt while the person types in the terminal.
+3. The field list of `view.features[].panel` and `view.decisions`. This draft shows the minimum.
+4. An HTML form in an `ask` call. Version 1 marks it as not answerable.
+5. Raw hook rates are not known. The queue limit uses rates after the tap combined updates.
+
+## 10. Changes in draft 2, with evidence
+
+| Change | Evidence from the history |
+|---|---|
+| New message `status` with `idle` and `waiting_on` | 601 `ask` calls, all from lead sessions. Median wait 308 seconds, maximum 25 hours. `lead.idle` occurred 17 times against 37,769 `turn.end`. |
+| New verb `ask.answer` | 1,061 questions and forms. 34 answers used free text. |
+| New verb `agent.cancel` | 270 subagent messages ended with `aborted`. No verb could address one subagent. |
+| `deliver_as` on `session.prompt`; error `busy` removed | 129 prompts arrived while the agent was busy. omp queues them as steers. |
+| Client makes `harness.decision` and `harness.panel`; panel state in `view` | The server made 716 and 361 of these from project files. Rule 6.6 forbids that. |
+| Status values `failed` and `removed`; `canceled` removed | Ledgers: 10 `failed`, 1 `removed`, 0 `canceled`. |
+| More feature and flow fields in `view` | 176 of 265 flow-step records had fields with no place in draft 1. |
+| Kinds `user.prompt` and `session.compaction` | 1,718 lead user messages, 104 steers, 1,751 compactions. |
+| `stall` made by the server | 1,221 `stall` envelopes. The rules need only events and status. |
+| Reconnect on a timer | Median prompt cycle 162 seconds; maximum active time 105 hours. |
+| Queue limit 2,500 events or 2 MiB | Peak 2,420 events in 60 seconds for one lead group. 99th percentile event size 552 bytes. |
+| `hello`: `json` mode, `cwd`, `session.file`, `harness.build`, role `advisor`, `project.common_key` | omp has a `json` mode. 50 advisor sessions. 19 lead sessions ran in worktrees. |
+| Sessions with no harness root do not connect | 67 of 185 lead sessions had no harness. |
+| `bye` reasons `signal` and `fatal`; `pending_calls` | 46 runs ended by a signal, 2 by a fatal error, 26 with no exit record. |
+| Rule for a known `session.id` | 185 lead sessions had 341 process runs with the same id. |
+| Minimum of 512 connections | 134 sessions wrote in the same minute. |
+
+Not accepted from the check:
+
+- A partial view update (`view.patch`). The largest view was 66 KB and the highest rate was 156 changes each hour. That is approximately 10 MB each hour on a local socket. The limit of one view each second is sufficient for version 1.
+- A kind for model changes. `agent.progress` and `status` already give the model.
