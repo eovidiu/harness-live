@@ -143,7 +143,7 @@ It is small. The client sends it when a value changes.
 | `waiting_on.call` | The id of the `ask` tool call. The verb `ask.answer` uses it. |
 | `waiting_on.topic` | The harness prefix of the question, or `null`: `review`, `ops`, `spec`, `flow_approval`, `flow_move`, `preflight`, `harness-config`, and others. |
 | `waiting_on.feature` | The feature id, or `null`. |
-| `waiting_on.answerable` | `false` if the question cannot be answered through the protocol. An HTML form is not answerable in version 1; the person answers it in the terminal. |
+| `waiting_on.answerable` | `false` if the question cannot be answered through the protocol. An HTML form is not answerable in version 1: the person answers it in the terminal. For a form, `questions` is empty. Version 1 never sends HTML. |
 
 ### 3.3 `view`
 
@@ -390,8 +390,7 @@ with the project root as the working directory. The provider:
 1. Not tested: an omp extension can answer an open `ask` call for a `tui` session. The verb `ask.answer` depends on this. A small test is necessary.
 2. Not tested: the result when the server sends a prompt while the person types in the terminal.
 3. The field list of `view.features[].panel` and `view.decisions`. This draft shows the minimum.
-4. An HTML form in an `ask` call. Version 1 marks it as not answerable.
-5. Raw hook rates are not known. The queue limit uses rates after the tap combined updates.
+4. Raw hook rates are not known. The queue limit uses rates after the tap combined updates.
 
 ## 10. Changes in draft 2, with evidence
 
@@ -413,6 +412,12 @@ with the project root as the working directory. The provider:
 | `bye` reasons `signal` and `fatal`; `pending_calls` | 46 runs ended by a signal, 2 by a fatal error, 26 with no exit record. |
 | Rule for a known `session.id` | 185 lead sessions had 341 process runs with the same id. |
 | Minimum of 512 connections | 134 sessions wrote in the same minute. |
+
+Decided after the check:
+
+- Only a lead session and a provider send a `view`.
+- The server sends `ask.answer` only with the permission of the user for that project.
+- No HTML in version 1. A form in an `ask` call is visible as a waiting state, but it is not answerable.
 
 Not accepted from the check:
 
