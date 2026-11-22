@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Miro__canvas_get_canvas_composer_skill",
+      "mcp__Miro__canvas_load_format_skill",
+      "mcp__Miro__canvas_search",
+      "mcp__Miro__canvas_read_as_svg",
+      "mcp__Miro__canvas_create_from_svg",
+      "mcp__Miro__canvas_update_from_svg",
+      "mcp__Miro__board_show"
+    ]
+  }
+}
