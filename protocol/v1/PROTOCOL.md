@@ -78,7 +78,7 @@ client                                server
   "omp": { "version": "19.1.0", "mode": "tui" },
   "pid": 48211,
   "started_at": 1795340000000,
-  "verbs": ["session.prompt", "session.abort", "session.shutdown", "ask.answer", "agent.cancel", "view.refresh", "ledger.sync"]
+  "verbs": ["session.prompt", "session.abort", "session.shutdown", "agent.cancel", "view.refresh", "ledger.sync"]
 }
 ```
 
@@ -118,18 +118,7 @@ It is small. The client sends it when a value changes.
     "since": 1795340000900,
     "feature": "F012",
     "topic": "review",
-    "answerable": true,
-    "questions": [
-      {
-        "id": "q0",
-        "header": "F012 review",
-        "question": "All lenses approved round 2. The change touches a risk_high path. Accept?",
-        "options": [ { "label": "Accept" }, { "label": "Reject" } ],
-        "recommended": "Accept",
-        "multi": false,
-        "free_text": true
-      }
-    ]
+    "fields": 1
   }
 }
 ```
@@ -138,12 +127,19 @@ It is small. The client sends it when a value changes.
 |---|---|
 | `rev` | Increases by 1 for each status on this connection. |
 | `idle` | `true` when the agent waits for a user prompt. The server uses it to show the session state. |
-| `waiting_on` | `null`, or the open question that a person must answer. |
+| `waiting_on` | `null`, or a short record of the open question that a person must answer. |
 | `waiting_on.kind` | `ask` in version 1. |
-| `waiting_on.call` | The id of the `ask` tool call. The verb `ask.answer` uses it. |
+| `waiting_on.call` | The id of the `ask` tool call. |
+| `waiting_on.since` | The time when the question opened. |
 | `waiting_on.topic` | The harness prefix of the question, or `null`: `review`, `ops`, `spec`, `flow_approval`, `flow_move`, `preflight`, `harness-config`, and others. |
 | `waiting_on.feature` | The feature id, or `null`. |
-| `waiting_on.answerable` | `false` if the question cannot be answered through the protocol. An HTML form is not answerable in version 1: the person answers it in the terminal. For a form, `questions` is empty. Version 1 never sends HTML. |
+| `waiting_on.fields` | The number of fields in the question. |
+
+Version 1 does not send the content of a question and has no verb to answer one.
+The server shows that a session waits. The person answers:
+
+- in the terminal, for a session that the person started;
+- on the tracker issue, for a session that the server started. The harness posts the question as a comment on the issue and reads the reply there. The server takes no part in this.
 
 ### 3.3 `view`
 
@@ -283,10 +279,10 @@ These current kinds are not in version 1:
 
 ```json
 { "t": "cmd_result", "id": "c-7f3a", "ok": true, "data": { "delivered_as": "steer" } }
-{ "t": "cmd_result", "id": "c-7f3b", "ok": false, "error": { "code": "stale", "message": "the question is closed" } }
+{ "t": "cmd_result", "id": "c-7f3b", "ok": false, "error": { "code": "refused", "message": "a question is open" } }
 ```
 
-Error codes: `unknown_verb`, `bad_args`, `stale`, `refused`, `failed`, `timeout`.
+Error codes: `unknown_verb`, `bad_args`, `refused`, `failed`, `timeout`.
 
 ### 3.6 `bye`
 
@@ -342,14 +338,13 @@ Verbs in version 1:
 | `session.prompt` | `text`, `deliver_as` | Adds a user message. The gates apply as usual. | `tui` lead sessions |
 | `session.abort` | none | Stops the current agent operation. | `tui` lead sessions |
 | `session.shutdown` | none | Stops the session. | `tui` lead sessions |
-| `ask.answer` | `call`, `answers`, `text` | Answers the open question in `status.waiting_on`. | lead sessions |
 | `agent.cancel` | `agent` | Stops one subagent. | lead sessions |
 | `view.refresh` | none | Builds and sends a new `view`. | lead sessions, providers |
 | `ledger.sync` | none | Syncs the ledger with the tracker, then sends a new `view`. | lead sessions |
 
 - `deliver_as`: `auto`, `steer` or `follow_up`. With `auto`, omp starts a prompt if the agent is idle and queues a steer if the agent is busy. The result gives `delivered_as`.
-- `ask.answer`: `answers` is an object from question id to the selected labels. `text` is optional free text. If `call` is not the open question, the result is `stale`.
-- A session that the server started in RPC mode gets prompt, steer, abort and stop through RPC on stdio. It does not list the `session.*` verbs in `hello`.
+- While `status.waiting_on` is set, the client answers `session.prompt` with `refused`. A message that arrives during an open question closes the question as an error in omp.
+- A session that the server started in RPC mode (`rpc-ui`) gets prompt, steer, abort and stop through RPC on stdio. It does not list the `session.*` verbs in `hello`.
 
 ## 5. Rules for the client
 
@@ -368,7 +363,6 @@ Verbs in version 1:
 4. When a socket closes, the server marks the session as ended. With no `bye` before the close, it marks an unclean end.
 5. The server sends a `cmd` only for a verb in the `verbs` list of that session.
 6. The server reads no project files and calls no tracker.
-7. The server sends `ask.answer` only if the project permits remote answers. This is a setting of the user, not of the repository.
 
 ## 7. Provider command
 
@@ -387,17 +381,23 @@ with the project root as the working directory. The provider:
 
 ## 9. Open points
 
-1. Not tested: an omp extension can answer an open `ask` call for a `tui` session. The verb `ask.answer` depends on this. A small test is necessary.
-2. Not tested: the result when the server sends a prompt while the person types in the terminal.
-3. The field list of `view.features[].panel` and `view.decisions`. This draft shows the minimum.
-4. Raw hook rates are not known. The queue limit uses rates after the tap combined updates.
+1. The field list of `view.features[].panel` and `view.decisions`. This draft shows the minimum.
+2. Raw hook rates are not known. The queue limit uses rates after the tap combined updates.
+3. For a session that the server started: the design of "question as a comment on the issue, reply on the issue". This is harness work, not protocol work.
+
+Tested on omp 19.1.0:
+
+- An extension can read the omp version (`pi.pi.VERSION`), the mode (`ctx.mode`) and the idle state (`ctx.isIdle()`).
+- `sendUserMessage` starts a prompt when the agent is idle and queues a steer when it is busy. Text that a person typed stays in the input box.
+- `sendUserMessage` during an open question closes the question as an error.
+- The `ask` tool exists only in `tui` and `rpc-ui` modes. In omp, `ctx.mode` gives `rpc` for both RPC modes.
+- An extension can answer an open question, but only through omp internals. Version 1 does not use this.
 
 ## 10. Changes in draft 2, with evidence
 
 | Change | Evidence from the history |
 |---|---|
-| New message `status` with `idle` and `waiting_on` | 601 `ask` calls, all from lead sessions. Median wait 308 seconds, maximum 25 hours. `lead.idle` occurred 17 times against 37,769 `turn.end`. |
-| New verb `ask.answer` | 1,061 questions and forms. 34 answers used free text. |
+| New message `status` with `idle` and a short `waiting_on` record | 601 `ask` calls, all from lead sessions. Median wait 308 seconds, maximum 25 hours. `lead.idle` occurred 17 times against 37,769 `turn.end`. |
 | New verb `agent.cancel` | 270 subagent messages ended with `aborted`. No verb could address one subagent. |
 | `deliver_as` on `session.prompt`; error `busy` removed | 129 prompts arrived while the agent was busy. omp queues them as steers. |
 | Client makes `harness.decision` and `harness.panel`; panel state in `view` | The server made 716 and 361 of these from project files. Rule 6.6 forbids that. |
@@ -416,8 +416,8 @@ with the project root as the working directory. The provider:
 Decided after the check:
 
 - Only a lead session and a provider send a `view`.
-- The server sends `ask.answer` only with the permission of the user for that project.
-- No HTML in version 1. A form in an `ask` call is visible as a waiting state, but it is not answerable.
+- No verb to answer a question in version 1, and no question content on the wire. The server shows only that a session waits. Reasons: on omp 19.1.0 each question is an HTML form; an answer from an extension needs omp internals; the person is at the same computer as the terminal.
+- A session that the server started gets its answers on the tracker issue, not through the server.
 
 Not accepted from the check:
 
